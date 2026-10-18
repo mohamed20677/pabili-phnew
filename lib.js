@@ -1,0 +1,87 @@
+// Pabili PH — theme, i18n, constants, shared rules (full build)
+import { createContext, useContext } from 'react';
+
+export const C = {
+  green: '#0E7C5B', greenDk: '#0A5C44', gold: '#F2A900', ink: '#17231E',
+  mute: '#6B7A72', line: '#DCE5DF', paper: '#F6F8F5', card: '#FFFFFF',
+  bad: '#C0392B', pinkBg: '#FDECEC', amber: '#B7791F',
+};
+export const peso = (n) => '₱' + Number(n || 0).toFixed(2).replace(/\.00$/, '');
+export const now = () => Date.now();
+export const OFFER_SECS_DEFAULT = 30;
+export const VENDOR_SECS_DEFAULT = 60;
+export const MAX_DRIVERS_DEFAULT = 3;
+
+// ---------- i18n ----------
+const STR = {
+  en: {
+    login: 'Log in', phonePh: '0XXX XXX XXXX', sendCode: 'Send code',
+    social: 'Or log in with social media', termsNote: 'Using this app means you agree to the Terms of Use.',
+    otpTitle: 'Verification code', otpSub: 'Enter the code sent to', resendIn: 'Resend in',
+    resend: 'Resend code', safeNote: 'Your data is safe! We never share it with anyone.',
+    verify: 'Verify', testHint: 'Testing codes: users 1234 — admin 1785',
+    tTitle: 'Accept Privacy Policy and Terms',
+    tBody: 'By tapping "I agree", I confirm that I have read and accept the Privacy Policy and Terms, and I agree to enable personalized marketing content and ads.',
+    tC1: 'I agree to the Privacy Policy and Terms', tC2: 'Enable personalized marketing content and ads', agree: 'I agree',
+    home: 'Home', orders: 'Orders', alerts: 'Alerts', myPage: 'My Page',
+    howHelp: 'How can we help you today?', orderAny: 'Order anything', sendAny: 'Send anything',
+    orderAnySub: 'Order anything you can think of', sendAnySub: 'Have something to deliver? We pick it up and drop it off',
+    mostReq: 'Most requested', nearYou: 'We are with you, near you', needHelp: 'Need help?',
+    helpSub: 'From LPG tanks to furniture moving — leave the heavy lifting to us',
+    orderDetails: 'Order details', pickCat: 'Pick a category and describe your order in detail.',
+    describe: 'Describe what you need...', deliveryDetails: 'Add delivery details',
+    pickupFrom: 'Pickup from', chooseStore: 'Choose the store or pin the location',
+    deliverTo: 'Deliver to', home2: 'Home', payMethod: 'Payment method', change: 'Change',
+    wallet: 'Wallet', deliveryCredit: 'Delivery credit', ordersCount: 'Orders', savedAddr: 'Saved addresses',
+    userMode: 'User mode', ratings: 'Service ratings', notes: 'User notes', coupons: 'Coupons',
+    addCoupon: 'Add coupon', support: 'Customer support', offers: 'Partner offers', settings: 'Settings',
+    payMethods: 'Payment methods', unverified: 'Unverified', verified: 'Verified',
+    switchTitle: 'Switch to courier mode?', switchBody: 'Courier mode makes delivering orders easier. To enable it, complete verification and wait for admin approval.',
+    switchDo: 'Switch', back: 'Back', placeOrder: 'Place order', feeOffer: 'Your delivery fee offer',
+    cancel: 'Cancel order', reorder: 'Reorder', recentOrders: 'Your recent orders', cancelled: 'Cancelled',
+    accept: 'Accept', counter: 'Counter', refuse: 'Refuse', send: 'Send', negotiating: 'Negotiating',
+    confirm: 'Confirm', approve: 'Approve', reject: 'Reject', logout: 'Log out',
+    kycDriver: 'Driver verification', kycVendor: 'Store verification', pending: 'Pending admin review',
+    takePhoto: 'Take photo', photoRequired: 'Photo is required to continue',
+    waitingStore: 'Waiting for the store to confirm stock and price', waitingDriver: 'Finding a courier',
+    onTheWay: 'On the way', deliveredC: 'Delivered — please confirm', completed: 'Completed',
+    lang: 'Language', newOrder: 'New order',
+  },
+  tl: {
+    login: 'Mag-log in', sendCode: 'Ipadala ang code', verify: 'I-verify', agree: 'Sumang-ayon ako',
+    home: 'Home', orders: 'Mga Order', alerts: 'Alerts', myPage: 'Akin', howHelp: 'Paano ka namin matutulungan?',
+    orderAny: 'Umorder ng kahit ano', sendAny: 'Magpadala ng kahit ano', accept: 'Tanggapin',
+    counter: 'Mag-counter', refuse: 'Tanggihan', cancel: 'Kanselahin', reorder: 'I-order ulit',
+    confirm: 'Kumpirmahin', approve: 'Aprubahan', reject: 'Tanggihan', logout: 'Mag-log out',
+    completed: 'Tapos na', back: 'Bumalik', lang: 'Wika', newOrder: 'Bagong order',
+  },
+};
+export const LangCtx = createContext({ lang: 'en', setLang: () => {} });
+export const useT = () => { const { lang } = useContext(LangCtx); return (k) => (STR[lang] && STR[lang][k]) || STR.en[k] || k; };
+
+// ---------- auth constants (stage 1 testing) ----------
+export const ADMIN_PHONE = '562989152';   // 0562989152 without the leading 0
+export const ADMIN_CODE = '1785';
+export const USER_TEST_CODE = '1234';     // TESTING ONLY — remove when SMS goes live
+export const normalizePhone = (s) => String(s || '').replace(/\D/g, '').replace(/^0+/, '');
+export const isAdminPhone = (d) => d === ADMIN_PHONE;
+export const validPhone = (d) => d === ADMIN_PHONE || d.length === 10;
+
+// ---------- domain constants ----------
+export const CATEGORIES = ['Food', 'Coffee', 'Supermarket', 'Pharmacy', 'Sari-sari', 'Gas / LPG', 'Flowers', 'Parcel'];
+export const ORDER_STATUS = {
+  vendor_quote: 'Waiting for the store', quote_review: 'Review the store quote',
+  finding_driver: 'Finding a courier', driver_talk: 'Negotiating with courier',
+  accepted: 'Courier accepted — store is preparing', ready_pickup: 'Ready for pickup',
+  picked_up: 'On the way', delivered: 'Delivered — please confirm',
+  completed: 'Completed', cancelled: 'Cancelled', disputed: 'Under admin review',
+};
+// photo gates: each transition REQUIRES a photo (proof chain)
+export const PHOTO_STEPS = [
+  { key: 'product', by: 'vendor', label: 'Actual product photo' },
+  { key: 'packed', by: 'vendor', label: 'Packed order photo' },
+  { key: 'pickup', by: 'driver', label: 'Pickup proof photo' },
+  { key: 'delivery', by: 'driver', label: 'Delivery proof photo' },
+];
+export const uid = () => 'id_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+export const fmtTime = (ts) => new Date(ts).toLocaleString();

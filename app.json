@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "Pabili",
+    "slug": "pabili-ph",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "platforms": ["android"],
+    "splash": { "backgroundColor": "#0E8A4F", "resizeMode": "contain" },
+    "android": { "package": "com.pabili.ph", "versionCode": 1, "permissions": ["INTERNET"] }
+  }
+}
