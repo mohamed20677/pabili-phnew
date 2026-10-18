@@ -2,15 +2,15 @@
 import React, { useState } from 'react';
 import { Modal, SafeAreaView, StatusBar, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { LangCtx, C } from './src/lib';
-import { StoreProvider, useStore } from './src/store';
-import { PhoneScreen, OtpScreen, TermsScreen } from './src/Auth';
-import { HomeScreen, OrderForm, OrdersTab } from './src/Customer';
-import Profile, { AlertsTab } from './src/Profile';
-import Driver from './src/Driver';
-import Vendor from './src/Vendor';
-import Admin from './src/Admin';
-import BottomNav from './src/BottomNav';
+import { LangCtx, C } from './lib';
+import { StoreProvider, useStore } from './store';
+import { PhoneScreen, OtpScreen, TermsScreen } from './Auth';
+import { HomeScreen, OrderForm, OrdersTab } from './Customer';
+import Profile, { AlertsTab } from './Profile';
+import Driver from './Driver';
+import Vendor from './Vendor';
+import Admin from './Admin';
+import BottomNav from './BottomNav';
 
 function Shell() {
   const { s, signIn, agreeTerms } = useStore();
