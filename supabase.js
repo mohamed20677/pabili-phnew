@@ -1,16 +1,17 @@
 // Pabili PH — Supabase adapter (live when .env has SUPABASE_URL + SUPABASE_ANON_KEY; falls back silently otherwise).
 // Created with the approved spec from the team. No fake keys: read from expo-constants / .env; if missing → null.
 import Constants from 'expo-constants';
-import 'react-native-get-random-values';
+// react-native-get-random-values polyfill is loaded in index.js BEFORE this module.
 import { createClient } from '@supabase/supabase-js';
 
 function readEnv() {
   const c = (Constants && Constants.expoConfig && Constants.expoConfig.extra) || {};
-  let envFile = null;
-  try { envFile = require('@react-native-async-storage/async-storage').getItem; } catch (e) {}
+  // CHANGED (live 2026-10-19): read pabili-ph live env (project mmhneaixcyvmciyioxeo)
+  // Note: SUPABASE_URL must be the base URL only (no /rest/v1/ suffix).
   return {
-    url: c.SUPABASE_URL || process.env.SUPABASE_URL || null,
-    anon: c.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || null,
+    url: c.SUPABASE_URL || process.env.SUPABASE_URL || 'https://mmhneaixcyvmciyioxeo.supabase.co',
+    anon: c.SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY ||
+          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1taG5lYWl4Y3l2bWNpeWlveGVvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIxNDkzMjIsImV4cCI6MjEwNzcyNTMyMn0.AxJXLHyzeJu9h7KUR-qmY9MGvvTKhRmnqZHVYHCD_H4',
   };
 }
 const { url, anon } = readEnv();
