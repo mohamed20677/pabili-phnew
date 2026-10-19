@@ -67,12 +67,16 @@ export default function App() {
   const [fontsLoaded] = useFonts({ 'Nunito-Regular': Nunito_400Regular, 'Nunito-Bold': Nunito_700Bold });
   const [lang, setLangState] = useState('en');
   const setLang = (l) => { setLangState(l); AsyncStorage.setItem('pabili.lang', l); };
-  if (!fontsLoaded) return <View style={{ flex: 1, backgroundColor: '#0E7C5B' }} />;
-  // CHANGED: wire Supabase session + Expo push when backend is live
+
+  // FIX BUILD V6 (hoist all hooks BEFORE any early return — React Rules of Hooks).
+  // Previous version called useEffect AFTER `if (!fontsLoaded) return ...`, which caused
+  // "Rendered more hooks than during the previous render" when fonts finished loading.
   React.useEffect(() => {
     wireSupabaseSession().catch(() => {});
     if (SUPABASE_ENABLED) initPush().catch(() => {});
   }, []);
+
+  if (!fontsLoaded) return <View style={{ flex: 1, backgroundColor: '#0E7C5B' }} />;
   return (
     <LangCtx.Provider value={{ lang, setLang }}>
       <StoreProvider>
