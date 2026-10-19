@@ -1,7 +1,7 @@
 // Pabili PH — Auth screens: Login (green hero), OTP (4 boxes + timer), Terms consent.
 // Matches the reference screenshots exactly (same layout/colors), localized en/tl.
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, View } from 'react-native';
+import { Alert, Image, Pressable, View } from 'react-native';
 import { ADMIN_CODE, ADMIN_PHONE, isAdminPhone, normalizePhone, useT, validPhone, USER_TEST_CODE } from './lib';
 import { Btn, Card, Field, Txt } from './ui';
 
@@ -23,17 +23,19 @@ export function PhoneScreen({ onDone }) {
   };
 
   return (
-    <View style={{ flex: 1, backgroundColor: '#0E8A4F' }}>
+    <View style={{ flex: 1, backgroundColor: '#0E7C5B' }}>
       {/* hero ~65% */}
       <View style={{ flex: 1.8, alignItems: 'center', justifyContent: 'center' }}>
         <View style={{ position: 'absolute', top: 14, left: 14, width: 30, height: 30, borderRadius: 15,
                        backgroundColor: 'rgba(255,255,255,0.9)', alignItems: 'center', justifyContent: 'center' }}>
-          <Txt b c="#0E8A4F" s={16}>?</Txt>
+          <Txt b c="#0E7C5B" s={16}>?</Txt>
         </View>
-        {/* brand mark: connected-nodes style, drawn with circles + bars */}
+        {/* brand mark: approved logo lockup on white card (brand sheet 2026-10-19) */}
         <View style={{ alignItems: 'center' }}>
-          <Txt s={60} b c="#fff">Pabili</Txt>
-          <Txt c="#fff" s={13} style={{ opacity: 0.9, marginTop: 4 }}>Any item, any store, any time.</Txt>
+          <View style={{ backgroundColor: '#fff', borderRadius: 26, paddingVertical: 12, paddingHorizontal: 20 }}>
+            <Image source={require('./assets/logo-lockup.png')} style={{ width: 216, height: 144 }} resizeMode="contain" />
+          </View>
+          <Txt c="#fff" s={13} style={{ opacity: 0.92, marginTop: 12 }}>Any item, any store, any time.</Txt>
         </View>
       </View>
       {/* bottom sheet ~35% */}
@@ -128,14 +130,7 @@ export function TermsScreen({ onAgree }) {
   return (
     <View style={{ flex: 1, backgroundColor: '#fff', padding: 24, justifyContent: 'space-between' }}>
       <View style={{ alignItems: 'center', marginTop: 60 }}>
-        <View style={{ width: 74, height: 74, borderRadius: 20, backgroundColor: '#0E8A4F',
-                       alignItems: 'center', justifyContent: 'center', marginBottom: 26 }}>
-          <View style={{ position: 'absolute', right: -6, bottom: -6, width: 30, height: 30, borderRadius: 15,
-                         backgroundColor: '#F2A900', alignItems: 'center', justifyContent: 'center' }}>
-            <Txt b c="#fff">i</Txt>
-          </View>
-          <Txt b c="#fff" s={30}>=</Txt>
-        </View>
+        <Image source={require('./assets/icon.png')} style={{ width: 74, height: 74, borderRadius: 20, marginBottom: 26 }} />
         <Txt b s={20} style={{ textAlign: 'center' }}>{T('tTitle')}</Txt>
         <Txt c="#6B7A72" s={13} style={{ textAlign: 'center', marginTop: 14, lineHeight: 20 }}>{T('tBody')}</Txt>
       </View>

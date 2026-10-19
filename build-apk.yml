@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Workflow version check
-        run: echo "=== PABILI-PH BUILD V1 ==="
+        run: echo "=== PABILI-PH BUILD V2 (BRAND ICON+FONTS) ==="
 
       - uses: actions/checkout@v4
 
@@ -47,7 +47,7 @@ jobs:
             || echo "PILLOW unavailable - pure-python fallback"
           python3 << 'PYEOF'
           import os, zlib, struct
-          BRAND = (14, 138, 79)  # #0E8A4F login green
+          BRAND = (14, 124, 91)  # #0E8A4F login green
           def chunk(tag, data):
               return (struct.pack('>I', len(data)) + tag + data
                       + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff))

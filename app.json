@@ -2,11 +2,35 @@
   "expo": {
     "name": "Pabili",
     "slug": "pabili-ph",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "platforms": ["android"],
-    "splash": { "backgroundColor": "#0E8A4F", "resizeMode": "contain" },
-    "android": { "package": "com.pabili.ph", "versionCode": 1, "permissions": ["INTERNET"] }
+    "platforms": [
+      "android"
+    ],
+    "icon": "./assets/icon.png",
+    "notification": {
+      "icon": "./assets/notification-icon.png",
+      "color": "#0E7C5B"
+    },
+    "splash": {
+      "image": "./assets/splash.png",
+      "backgroundColor": "#0E7C5B",
+      "resizeMode": "contain"
+    },
+    "android": {
+      "package": "com.pabili.ph",
+      "versionCode": 2,
+      "permissions": [
+        "INTERNET"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0E7C5B"
+      }
+    },
+    "plugins": [
+      "expo-font"
+    ]
   }
 }

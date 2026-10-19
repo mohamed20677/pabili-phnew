@@ -4,7 +4,8 @@ import { Pressable, Text, TextInput, View, StyleSheet } from 'react-native';
 import { C } from './lib';
 
 export function Txt({ children, s = 14, b, c = C.ink, style, ...rest }) {
-  return <Text {...rest} style={[{ fontSize: s, color: c, fontWeight: b ? '800' : '400' }, style]}>{children}</Text>;
+  // CHANGED: approved brand fonts (Nunito per brand sheet 2026-10-19)
+  return <Text {...rest} style={[{ fontSize: s, color: c, fontFamily: b ? 'Nunito-Bold' : 'Nunito-Regular', fontWeight: b ? '700' : '400' }, style]}>{children}</Text>;
 }
 export function Btn({ title, onPress, kind = 'main', busy, disabled, style, small }) {
   const bg = kind === 'main' ? C.green : kind === 'bad' ? C.bad : kind === 'dark' ? '#111' : 'transparent';
@@ -59,7 +60,7 @@ export function Countdown({ left, total }) {
 }
 const st = StyleSheet.create({
   btn: { borderRadius: 16, paddingVertical: 15, alignItems: 'center', justifyContent: 'center', marginTop: 14 },
-  field: { borderWidth: 1, borderColor: C.line, borderRadius: 14, padding: 14, color: C.ink, fontSize: 16, backgroundColor: C.card },
+  field: { borderWidth: 1, borderColor: C.line, borderRadius: 14, padding: 14, color: C.ink, fontSize: 16, fontFamily: 'Nunito-Regular', backgroundColor: C.card },
   card: { backgroundColor: C.card, borderRadius: 18, padding: 16, borderWidth: 1, borderColor: C.line,
           shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 2 },
   chip: { borderWidth: 1, borderColor: C.line, borderRadius: 20, paddingVertical: 8, paddingHorizontal: 14, marginRight: 8, backgroundColor: '#fff' },

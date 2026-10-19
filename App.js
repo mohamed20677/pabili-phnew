@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import { Modal, SafeAreaView, StatusBar, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFonts } from 'expo-font';
 import { LangCtx, C } from './lib';
 import { StoreProvider, useStore } from './store';
 import { PhoneScreen, OtpScreen, TermsScreen } from './Auth';
@@ -59,8 +60,14 @@ function Shell() {
 }
 
 export default function App() {
+  // CHANGED: load approved brand fonts (Nunito) before first paint
+  const [fontsLoaded] = useFonts({
+    'Nunito-Regular': require('./assets/fonts/nunito-400.ttf'),
+    'Nunito-Bold': require('./assets/fonts/nunito-700.ttf'),
+  });
   const [lang, setLangState] = useState('en');
   const setLang = (l) => { setLangState(l); AsyncStorage.setItem('pabili.lang', l); };
+  if (!fontsLoaded) return <View style={{ flex: 1, backgroundColor: '#0E7C5B' }} />;
   return (
     <LangCtx.Provider value={{ lang, setLang }}>
       <StoreProvider>
