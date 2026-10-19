@@ -40,3 +40,8 @@ export async function notify(title, body) {
 }
 
 export function pushToken() { return _token; }
+
+// FIX BUILD V7 (export alias): App.js + api.js both call `initPush(...)`, but this
+// module's real function is named `registerPush`. Without this alias the app crashes
+// at runtime with "TypeError: 0,c.initPush is not a function (it is undefined)".
+export { registerPush as initPush };
