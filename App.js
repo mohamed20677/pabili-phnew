@@ -3,6 +3,9 @@ import React, { useState } from 'react';
 import { Modal, SafeAreaView, StatusBar, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFonts } from 'expo-font';
+import { Nunito_400Regular, Nunito_700Bold } from '@expo-google-fonts/nunito';
+import { wireSupabaseSession, SUPABASE_ENABLED } from './supabase';
+import { initPush } from './notifications';
 import { LangCtx, C } from './lib';
 import { StoreProvider, useStore } from './store';
 import { PhoneScreen, OtpScreen, TermsScreen } from './Auth';
@@ -60,14 +63,16 @@ function Shell() {
 }
 
 export default function App() {
-  // CHANGED: load approved brand fonts (Nunito) before first paint
-  const [fontsLoaded] = useFonts({
-    'Nunito-Regular': require('./assets/fonts/nunito-400.ttf'),
-    'Nunito-Bold': require('./assets/fonts/nunito-700.ttf'),
-  });
+  // CHANGED (team 2026-10-19): Nunito via @expo-google-fonts/nunito — no TTF file needed at all
+  const [fontsLoaded] = useFonts({ 'Nunito-Regular': Nunito_400Regular, 'Nunito-Bold': Nunito_700Bold });
   const [lang, setLangState] = useState('en');
   const setLang = (l) => { setLangState(l); AsyncStorage.setItem('pabili.lang', l); };
   if (!fontsLoaded) return <View style={{ flex: 1, backgroundColor: '#0E7C5B' }} />;
+  // CHANGED: wire Supabase session + Expo push when backend is live
+  React.useEffect(() => {
+    wireSupabaseSession().catch(() => {});
+    if (SUPABASE_ENABLED) initPush().catch(() => {});
+  }, []);
   return (
     <LangCtx.Provider value={{ lang, setLang }}>
       <StoreProvider>

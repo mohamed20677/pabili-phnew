@@ -20,7 +20,7 @@
     },
     "android": {
       "package": "com.pabili.ph",
-      "versionCode": 2,
+      "versionCode": 3,
       "permissions": [
         "INTERNET"
       ],
