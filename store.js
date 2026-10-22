@@ -1,437 +1,334 @@
-// Pabili PH — local engine: state, persistence, order lifecycle,
-// multi-round negotiation with 30s/60s deadlines, photo proof chain,
-// wallets, commissions, KYC queue, admin actions + audit, bot counterparties.
+// Pabili PH — V17 store. Orders, rides, stores, approvals and wallet now live in Supabase and are
+// shared between phones (polled every 4 s + realtime hint). Local state keeps only what is personal
+// to this phone: session, language, saved addresses, cart draft, coupons, vendor catalog.
+// The old bot/timer simulator was removed on purpose — nothing in here is simulated any more.
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { uid, now } from './lib';
+import { stopBgTracking } from './tracking';
+import { notify } from './notifications';
+import { purgeMyFiles } from './media';
+import { supabase } from './supabase';
+import * as C from './cloud';
+import { uid, now, CATEGORIES } from './lib';
 
-const KEY = 'pabili.ph.v1';
-const DRIVER_NAMES = ['Juan D.', 'Maria S.', 'Pedro R.', 'Ana L.'];
-const BOT_CUSTOMERS = ['Ramon C.', 'Liza M.', 'Jose P.', 'Karen V.'];
-const ITEMS = ['2kg rice, 1 tomato paste, 3 eggs', '1 LPG tank refill', 'Pain reliever + vitamins', 'Bread, milk, coffee', 'Phone load ₱100', 'Fried chicken bucket'];
-
-const DEMO_USERS = [
-  { id: 'u_c1', name: 'Ramon Cruz', role: 'customer', phone: '+63917111001', wallet: 350, credit: 40, frozen: false, verified: true },
-  { id: 'u_c2', name: 'Liza Mercado', role: 'customer', phone: '+63917111002', wallet: 90, credit: 0, frozen: false, verified: true },
-  { id: 'u_d1', name: 'Juan Dela Cruz', role: 'driver', phone: '+63917111003', wallet: 720, credit: 130, frozen: false, verified: true },
-  { id: 'u_d2', name: 'Maria Santos', role: 'driver', phone: '+63917111004', wallet: 150, credit: 60, frozen: false, verified: true },
-  { id: 'u_v1', name: 'Aling Nena Sari-sari', role: 'vendor', phone: '+63917111005', wallet: 2400, credit: 0, frozen: false, verified: true },
-  { id: 'u_v2', name: 'Botika ni Jose', role: 'vendor', phone: '+63917111006', wallet: 980, credit: 0, frozen: false, verified: false },
-];
+const KEY = 'pabili.ph.v17';
+const POLL_MS = 4000;
 
 const DEFAULTS = () => ({
   auth: null, terms: false,
   roles: { driver: { status: 'none', data: null }, vendor: { status: 'none', data: null } },
   activeRole: 'customer',
-  profile: { name: 'Pabili User', rating: 5.0, coupons: [] },
-  addresses: [
-    { label: 'Home', addr: '3641 Yarmouk St, Aqrabiyah, Brgy. Sta. Rosa' },
-    { label: 'Work', addr: '3918 Al Hasa St, Al Khaleej' },
-  ],
-  wallet: { balance: 0, credit: 0, tx: [] },
-  catalog: [
-    { id: 'c1', name: 'Rice 1kg', price: 58 },
-    { id: 'c2', name: 'Softdrinks 1.5L', price: 75 },
-    { id: 'c3', name: 'Instant noodles', price: 18 },
-  ],
-  orders: [], alerts: [], audit: [],
-  users: DEMO_USERS,
-  kyc: [
-    { id: uid(), userId: 'u_v2', name: 'Botika ni Jose', role: 'vendor', status: 'pending', ts: now() - 86400000,
-      data: { store: 'Botika ni Jose', type: 'Pharmacy', permit: 'permit-photo.jpg', front: 'storefront.jpg' } },
-    { id: uid(), userId: 'u_d2', name: 'Maria Santos', role: 'driver', status: 'pending', ts: now() - 43200000,
-      data: { vehicle: 'Motorbike', model: 'Honda Click 125', plate: 'ABC-1234', license: 'license.jpg', selfie: 'selfie-id.jpg' } },
-  ],
+  profile: { name: 'Pabili User', rating: 5.0, coupons: [], avatar: null },
+  addresses: [],
+  wallet: { balance: 0, credit: 0, tx: [], withdrawals: [] },
+  cart: { items: [], shipping_fee: 25 },
+  catalog: [],
+  orders: [], alerts: [], audit: [], users: [], stores: [], kyc: [], myStore: null, frozen: false, net: 'ok',
+  driverLocations: {}, driverOnline: false,
   settings: {
     commissions: { customerPct: 3, vendorPct: 8, driverPct: 10 },
-    offerSecs: 30, vendorSecs: 60, maxDrivers: 3,
-    categories: ['Sari-sari', 'Groceries', 'Pharmacy', 'Gas / LPG', 'Food', 'Parcel', 'Flowers', 'Hardware'],
+    offerSecs: 30, vendorSecs: 60, customerSecs: 60, maxDrivers: 3,
+    categories: CATEGORIES.slice(),
     banner: { title: 'Your favorite store has no delivery?', cta: 'Order it from here' },
-    promoBar: true,
+    ride: { enabled: true, minFare: 20, base: 25, perKm: 10 },
   },
-  botSeed: 0,
 });
 
 const Ctx = createContext(null);
 export const useStore = () => useContext(Ctx);
+const errMsg = (e) => String((e && e.message) || e || 'Something went wrong');
+
+// What should this phone hear about when an order it is part of changes?
+function alertFor(o, prev) {
+  const ride = o.kind === 'ride';
+  const errand = o.kind === 'errand';
+  const changed = prev !== o.status;
+  if (o.myRole === 'vendor') {
+    if (!prev && o.status === 'vendor_quote') return '🛍 New order for your store';
+    if (changed && o.status === 'vendor_talk') return '💬 The customer countered your price';
+    if (changed && o.status === 'accepted') return '🛵 Courier accepted — pack the order';
+    if (changed && o.status === 'completed') return '✅ Order completed — check your wallet';
+  }
+  if (o.myRole === 'driver') {
+    if (o.status === 'driver_offer' && o.neg && o.neg.turn === 'me' && prev !== 'driver_offer') return ride ? '🚕 New ride request' : '🛵 New delivery offer';
+    if (changed && prev === 'driver_talk' && o.status === 'accepted') return '✅ The customer accepted your fare';
+    if (changed && o.status === 'vendor_talk' && errand) return '💬 The customer countered your item price';
+    if (changed && o.status === 'ready_pickup' && errand) return '✅ Approved — go ahead and buy it';
+    if (changed && o.status === 'ready_pickup' && !ride) return '📦 The store packed the order — go pick it up';
+    if (changed && o.status === 'completed') return '✅ Paid — check your wallet';
+    if (changed && o.status === 'cancelled') return 'Order cancelled by the customer';
+  }
+  if (o.myRole === 'customer' && changed) {
+    if (o.status === 'quote_review') return errand ? '🧾 Your courier found it — check the price and photo' : '🧾 The store sent its price and photo';
+    if (o.status === 'finding_driver' && (prev === 'quote_review' || prev === 'vendor_talk')) return '👍 Price agreed — finding a courier';
+    if (o.status === 'driver_talk' && o.neg) return `🛵 The ${ride ? 'driver' : 'courier'} asks ₱${o.neg.amount}`;
+    if (o.status === 'accepted') return ride ? '🚕 A driver accepted — on the way to you' : '🛵 A courier accepted your order';
+    if (o.status === 'ready_pickup') return ride ? '📍 Your driver has arrived' : errand ? null : '📦 The store packed your order';
+    if (o.status === 'picked_up') return ride ? '🚕 Trip started' : '🛵 Your order is on the way';
+    if (o.status === 'delivered') return ride ? '🏁 You have arrived — please confirm' : '📬 Delivered — please confirm';
+    if (o.status === 'cancelled') return 'Order cancelled';
+  }
+  return null;
+}
 
 export function StoreProvider({ children }) {
   const [s, setS] = useState(null);
-  const [tick, setTick] = useState(0);
   const sRef = useRef(s); sRef.current = s;
+  const prevRef = useRef(null);   // orderId -> last status seen (for alerts)
+  const busyRef = useRef(false);
+  const againRef = useRef(false);
+  const pollN = useRef(0);
 
-  useEffect(() => { AsyncStorage.getItem(KEY).then((v) => setS(v ? JSON.parse(v) : DEFAULTS())); }, []);
-  useEffect(() => { if (s) AsyncStorage.setItem(KEY, JSON.stringify(s)); }, [s]);
-
-  // ---------- engine tick: deadlines + bot progress every 1s ----------
+  // ---- load / persist ----
   useEffect(() => {
-    const t = setInterval(() => { setTick((x) => x + 1); setS((cur) => engine(cur)); }, 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  function engine(cur) {
-    if (!cur) return cur;
-    let changed = false;
-    const orders = cur.orders.map((o) => {
-      const n = { ...o };
-      const age = (now() - n.updated) / 1000;
-
-      // --- MY customer orders: bot vendor quotes ---
-      if (n.mine && n.kind === 'order' && n.status === 'vendor_quote' && age > 4) {
-        n.price = Math.round(80 + Math.random() * 220);
-        n.photos = { ...n.photos, product: photo('vendor', 'product') };
-        n.neg = { phase: 'vendor', turn: 'me', amount: n.price, deadline: now() + cur.settings.vendorSecs * 1000,
-                  history: [{ by: 'vendor', amount: n.price, ts: now(), note: 'Store quote + product photo' }] };
-        n.status = 'quote_review'; n.updated = now(); changed = true;
-      }
-      // --- bot vendor answers my counter ---
-      if (n.mine && n.neg && n.neg.phase === 'vendor' && n.neg.turn === 'them' && age > 3) {
-        const base = n.neg.history[0].amount;
-        const ask = n.neg.amount;
-        if (ask >= base * 0.8) { // accept my counter
-          n.neg.history.push({ by: 'vendor', amount: ask, ts: now(), note: 'Store accepted your price' });
-          n.price = ask; n.neg = null; n.status = 'quote_review'; n.updated = now();
-          n.acceptPrice = true;
-        } else {
-          const mid = Math.round((ask + base) / 2);
-          n.neg = { ...n.neg, turn: 'me', amount: mid, deadline: now() + cur.settings.offerSecs * 1000,
-                    history: [...n.neg.history, { by: 'vendor', amount: mid, ts: now(), note: 'Store counter' }] };
-          n.updated = now();
-        }
-        changed = true;
-      }
-      // --- vendor quote timeout (my turn to answer the store) -> keep waiting (customer owns cancel) ---
-      // --- MY orders: driver dispatch chain ---
-      if (n.mine && (n.status === 'finding_driver' || n.status === 'driver_offer') && !n.neg) {
-        const idx = n.driverIdx || 0;
-        if (n.status === 'finding_driver' && age > 3) {
-          if (idx >= cur.settings.maxDrivers) {
-            n.widened = true; n.note = 'Widening search area…'; n.updated = now(); changed = true; return n;
-          }
-          const fee = n.fee;
-          n.status = 'driver_offer';
-          n.neg = { phase: 'driver', turn: 'them', amount: fee, deadline: now() + cur.settings.offerSecs * 1000,
-                    driver: DRIVER_NAMES[idx % DRIVER_NAMES.length],
-                    history: [{ by: 'customer', amount: fee, ts: now(), note: 'Your fee offer' }] };
-          n.updated = now(); changed = true;
-        }
-      }
-      // --- bot driver answers the offer (their turn) after 2s ---
-      if (n.mine && n.status === 'driver_offer' && n.neg && n.neg.phase === 'driver' && n.neg.turn === 'them' && age > 2) {
-        const ask = n.neg.amount;
-        const botAccepts = ask >= 40 || Math.random() > 0.35;
-        if (botAccepts) {
-          n.neg = null; n.status = 'accepted'; n.acceptedBy = n.neg0 || n.driver; n.driver = n.neg ? n.neg.driver : n.driver;
-          n.driver = n.driver || DRIVER_NAMES[(n.driverIdx || 0) % DRIVER_NAMES.length];
-          n.updated = now(); pushAlert(cur, 'Courier accepted — store is preparing your order');
-        } else {
-          const counter = Math.round(ask * 1.25);
-          n.neg = { ...n.neg, turn: 'me', amount: counter, deadline: now() + cur.settings.offerSecs * 1000,
-                    history: [...n.neg.history, { by: 'driver', amount: counter, ts: now(), note: (n.neg.driver || 'Courier') + ' countered' }] };
-          n.updated = now();
-        }
-        changed = true;
-      }
-      // --- bot driver answers my counter-offer ---
-      if (n.mine && n.neg && n.neg.phase === 'driver' && n.neg.turn === 'them' && n.status === 'driver_talk' && age > 3) {
-        const first = n.neg.history[0].amount;
-        const ask = n.neg.amount;
-        if (ask >= first * 1.1) {
-          n.fee = ask; n.neg = null; n.status = 'accepted'; n.updated = now();
-          pushAlert(cur, 'Courier accepted your offer');
-        } else {
-          const mid = Math.round((ask + first * 1.3) / 2);
-          n.neg = { ...n.neg, turn: 'me', amount: mid, deadline: now() + cur.settings.offerSecs * 1000,
-                    history: [...n.neg.history, { by: 'driver', amount: mid, ts: now(), note: 'Courier countered' }] };
-          n.status = 'driver_offer'; n.updated = now();
-        }
-        changed = true;
-      }
-      // --- deadline expiry: offer to me expired -> refuse -> next driver ---
-      if (n.mine && n.neg && n.neg.turn === 'me' && n.neg.phase === 'driver' && n.neg.deadline && now() > n.neg.deadline) {
-        n.neg = null; n.driverIdx = (n.driverIdx || 0) + 1; n.status = 'finding_driver'; n.updated = now();
-        pushAlert(cur, 'No answer in time — offering to the next courier');
-        changed = true;
-      }
-      // --- bot progress after acceptance (vendor packs, etc.) for MY orders ---
-      if (n.mine && n.status === 'accepted' && age > 5 && !n.photos?.packed) {
-        n.photos = { ...n.photos, packed: photo('vendor', 'packed') };
-        n.status = 'ready_pickup'; n.updated = now();
-        pushAlert(cur, 'Store packed your order (photo attached)');
-        changed = true;
-      }
-      if (n.mine && n.status === 'ready_pickup' && age > 6 && !n.photos?.pickup) {
-        n.photos = { ...n.photos, pickup: photo('driver', 'pickup') };
-        n.status = 'picked_up'; n.updated = now();
-        pushAlert(cur, 'Courier picked up your order (photo attached)');
-        changed = true;
-      }
-      if (n.mine && n.status === 'picked_up' && age > 8 && !n.photos?.delivery) {
-        n.photos = { ...n.photos, delivery: photo('driver', 'delivery') };
-        n.status = 'delivered'; n.updated = now();
-        pushAlert(cur, 'Courier delivered — please confirm receipt');
-        changed = true;
-      }
-
-      // --- orders where I am the VENDOR: bot customer responds to my quote/counter ---
-      if (!n.mine && n.myRole === 'vendor' && n.neg && n.neg.turn === 'them' && age > 3) {
-        const quote = n.neg.amount; // my quoted price
-        if (quote <= 250 || Math.random() > 0.35) {
-          n.neg = null; n.status = 'accepted'; n.updated = now();
-          pushAlert(cur, 'Customer accepted your quote — payment held');
-        } else {
-          const mid = Math.round(quote * 0.85);
-          n.neg = { ...n.neg, turn: 'me', amount: mid, deadline: now() + cur.settings.vendorSecs * 1000,
-                    history: [...n.neg.history, { by: 'customer', amount: mid, ts: now(), note: 'Customer countered' }] };
-          n.updated = now();
-        }
-        changed = true;
-      }
-      // --- orders where I am the DRIVER: bot customer answers my counter ---
-      if (!n.mine && n.myRole === 'driver' && n.neg && n.neg.phase === 'driver' && n.neg.turn === 'them' && age > 3) {
-        const ask = n.neg.amount; const first = n.neg.history[0].amount;
-        if (ask <= first * 1.5) {
-          n.fee = ask; n.neg = null; n.status = 'accepted'; n.updated = now();
-          pushAlert(cur, 'Customer accepted your fare');
-        } else {
-          const mid = Math.round((ask + first) / 2);
-          n.neg = { ...n.neg, turn: 'me', amount: mid, deadline: now() + cur.settings.offerSecs * 1000,
-                    history: [...n.neg.history, { by: 'customer', amount: mid, ts: now(), note: 'Customer countered' }] };
-          n.updated = now();
-        }
-        changed = true;
-      }
-      // --- my deadline on bot orders expires -> I lose it ---
-      if (!n.mine && n.neg && n.neg.turn === 'me' && n.neg.deadline && now() > n.neg.deadline) {
-        n.expired = true; n.neg = null; n.updated = now();
-        pushAlert(cur, 'Offer expired — assigned to someone else');
-        changed = true;
-      }
-      // --- bot pipeline for accepted bot-orders where I'm the vendor ---
-      if (!n.mine && n.myRole === 'vendor' && n.status === 'accepted' && age > 8) {
-        n.status = 'awaiting_pack'; n.updated = now(); changed = true;
-      }
-      // --- bot driver picked up my packed order, then delivers ---
-      if (!n.mine && n.myRole === 'vendor' && n.status === 'handover_done' && age > 7) {
-        n.photos = { ...n.photos, pickup: photo('driver', 'pickup') }; n.status = 'picked_up'; n.updated = now(); changed = true;
-      }
-      if (!n.mine && n.myRole === 'vendor' && n.status === 'picked_up' && age > 8) {
-        n.photos = { ...n.photos, delivery: photo('driver', 'delivery') }; n.status = 'delivered'; n.updated = now(); changed = true;
-      }
-      if (!n.mine && n.myRole === 'vendor' && n.status === 'delivered' && age > 5) {
-        n.status = 'completed'; n.updated = now();
-        const earn = Math.round(n.price * (1 - cur.settings.commissions.vendorPct / 100));
-        credit(cur, earn, 'sale', n.id); pushAlert(cur, 'Order completed — earnings added to your wallet');
-        changed = true;
-      }
-      // --- bot pipeline where I'm the driver: vendor packs after accept ---
-      if (!n.mine && n.myRole === 'driver' && n.status === 'accepted' && age > 6) {
-        n.photos = { ...n.photos, packed: photo('vendor', 'packed') }; n.status = 'ready_pickup'; n.updated = now(); changed = true;
-      }
-      if (!n.mine && n.myRole === 'driver' && n.status === 'delivered' && age > 5) {
-        n.status = 'completed'; n.updated = now();
-        const earn = Math.round(n.fee * (1 - cur.settings.commissions.driverPct / 100));
-        credit(cur, earn, 'delivery', n.id); pushAlert(cur, 'Delivered — earnings added to your wallet');
-        changed = true;
-      }
-      return n;
+    AsyncStorage.removeItem('pabili.ph.v1').catch(() => {});
+    AsyncStorage.getItem(KEY).then((v) => {
+      const base = DEFAULTS();
+      if (!v) { setS(base); return; }
+      const l = JSON.parse(v);
+      // cloud-backed slices always start empty and are refilled from Supabase
+      setS({ ...base, auth: l.auth || null, terms: !!l.terms, activeRole: l.activeRole || 'customer', profile: { ...base.profile, ...(l.profile || {}) },
+             addresses: l.addresses || [], cart: l.cart || base.cart, catalog: l.catalog || [], driverOnline: !!l.driverOnline });
     });
+  }, []);
+  useEffect(() => {
+    if (!s) return undefined;
+    const t = setTimeout(() => {
+      const { auth, terms, activeRole, profile, addresses, cart, catalog, driverOnline } = s;
+      AsyncStorage.setItem(KEY, JSON.stringify({ auth, terms, activeRole, profile, addresses, cart, catalog, driverOnline })).catch(() => {});
+    }, 800);
+    return () => clearTimeout(t);
+  }, [s && s.auth, s && s.terms, s && s.activeRole, s && s.profile, s && s.addresses, s && s.cart, s && s.catalog, s && s.driverOnline]);
 
-    // --- spawn bot orders for my driver/vendor dashboards ---
-    let botSeed = cur.botSeed;
-    const meDriverOn = cur.roles.driver.status === 'approved' && cur.driverOnline;
-    const meVendorOn = cur.roles.vendor.status === 'approved' && cur.storeOpen;
-    if ((meDriverOn || meVendorOn) && now() - (cur.lastBotAt || 0) > 45000) {
-      const role = meVendorOn && (!meDriverOn || Math.random() > 0.5) ? 'vendor' : 'driver';
-      const o = {
-        id: uid(), mine: false, myRole: role, kind: 'order',
-        customer: BOT_CUSTOMERS[Math.floor(Math.random() * BOT_CUSTOMERS.length)],
-        items: ITEMS[Math.floor(Math.random() * ITEMS.length)],
-        pickup: 'Aling Nena Sari-sari, Brgy. Sta. Rosa', dropoff: 'Blk 4 Lot 12, Brgy. Malinis',
-        fee: 20 + Math.round(Math.random() * 40), price: 0, status: role === 'vendor' ? 'vendor_quote' : 'finding_driver',
-        photos: {}, created: now(), updated: now(),
-      };
-      if (role === 'vendor') {
-        o.neg = { phase: 'vendor', turn: 'me', amount: 0, history: [{ by: 'customer', amount: 0, ts: now(), note: 'New order — set your price' }] };
-      } else {
-        o.neg = { phase: 'driver', turn: 'me', amount: o.fee, deadline: now() + cur.settings.offerSecs * 1000,
-                  history: [{ by: 'customer', amount: o.fee, ts: now(), note: 'Customer fee offer' }] };
+  // ---- sync ----
+  async function refreshCore(n) {
+    const cur = sRef.current;
+    if (!cur || !cur.auth || !cur.auth.phone) return;
+    const me = cur.auth.phone, admin = cur.auth.role === 'admin';
+    const patch = {};
+    let settings = cur.settings;
+    if (n % 10 === 0) { const st = await C.fetchSettings(); settings = { ...cur.settings, ...st, ride: { ...cur.settings.ride, ...(st.ride || {}) } }; patch.settings = settings; }
+    if (admin) {
+      patch.orders = await C.fetchAllOrders(me);
+      if (n % 2 === 0) { patch.kyc = await C.fetchKycAll(); patch.stores = await C.fetchStores(); patch.users = await C.fetchUsers(); patch.audit = await C.fetchAudit(); }
+    } else {
+      patch.orders = await C.fetchMyOrders(me);
+      if (n % 3 === 0) {
+        const [p, stores, tx] = await Promise.all([C.fetchProfileFull(me), C.fetchStores(), C.fetchWalletTx(me)]);
+        patch.stores = stores; patch.myStore = stores.find((x) => x.ownerPhone === me) || null;
+        patch.wallet = { ...cur.wallet, tx, balance: p ? Number(p.wallet_balance || 0) : cur.wallet.balance };
+        if (p) {
+          patch.roles = { driver: { status: p.driver_status || 'none', data: null }, vendor: { status: p.vendor_status || 'none', data: null } };
+          patch.frozen = !!p.is_frozen; patch.myVehicle = C.vehicleLabel(p);
+        }
       }
-      orders.unshift(o); cur.lastBotAt = now(); botSeed++;
-      pushAlert(cur, role === 'vendor' ? 'New order for your store' : 'New delivery offer');
-      changed = true;
+      const searching = patch.orders.some((o) => o.mine && C.SEARCHING.includes(o.status));
+      if ((cur.driverOnline || searching) && (await C.dispatchTick(settings)) > 0) patch.orders = await C.fetchMyOrders(me);
     }
-    return changed ? { ...cur, orders, botSeed } : cur;
+    // alerts from order changes (skip the very first load so old orders don't flood)
+    const newAlerts = [];
+    if (prevRef.current) {
+      patch.orders.forEach((o) => {
+        if (o.myRole === 'observer') return;
+        const text = alertFor(o, prevRef.current[o.id]);
+        if (text) newAlerts.push({ id: uid(), text, ts: now(), read: false });
+      });
+    }
+    prevRef.current = Object.fromEntries(patch.orders.map((o) => [o.id, o.status]));
+    let bc = [];
+    if (n % 3 === 0) bc = await C.fetchBroadcasts();
+    setS((c) => {
+      if (!c || !c.auth) return c;
+      const known = new Set((c.alerts || []).map((a) => a.id));
+      const role = c.activeRole;
+      const fresh = bc.filter((b) => !known.has(b.id) && (b.target === 'all' || b.target === role));
+      const next = { ...c, ...patch, net: 'ok' };
+      if (patch.wallet) next.wallet = { ...c.wallet, ...patch.wallet };
+      if (newAlerts.length || fresh.length) next.alerts = [...newAlerts, ...fresh, ...(c.alerts || [])].slice(0, 60);
+      const r = next.roles || c.roles;
+      if ((next.activeRole === 'driver' && r.driver.status !== 'approved') || (next.activeRole === 'vendor' && r.vendor.status !== 'approved')) next.activeRole = 'customer';
+      return next;
+    });
+    newAlerts.slice(0, 3).forEach((a) => notify('Pabili', a.text));
   }
+  async function refresh(force) {
+    if (busyRef.current) { if (force) againRef.current = true; return; }
+    busyRef.current = true;
+    try { await refreshCore(force ? 0 : pollN.current++); }
+    catch (e) { setS((c) => (c && c.net !== 'offline' ? { ...c, net: 'offline' } : c)); }
+    finally { busyRef.current = false; if (againRef.current) { againRef.current = false; refresh(true); } }
+  }
+  const phone = s && s.auth && s.auth.phone;
+  useEffect(() => {
+    if (!phone) return undefined;
+    pollN.current = 0; prevRef.current = null;
+    refresh(false);
+    const id = setInterval(() => refresh(false), POLL_MS);
+    // realtime is only an accelerator (needs the orders table in the realtime publication; harmless if not)
+    let ch = null;
+    try { ch = supabase.channel('orders-live').on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => refresh(true)).subscribe(); } catch (e) { /* polling continues */ }
+    return () => { clearInterval(id); if (ch) supabase.removeChannel(ch); };
+  }, [phone]);
 
-  function photo(by, kind) {
-    return { by, kind, ts: now(), uri: null, stamp: new Date().toLocaleString() + ' · GPS locked', simulated: true };
+  // run an action, report failures honestly, then sync at once
+  async function run(label, fn) {
+    try { const r = await fn(); await refresh(true); return r === undefined ? true : r; }
+    catch (e) { Alert.alert(label, errMsg(e)); refresh(true); return null; }
   }
-  function pushAlert(cur, text) {
-    cur.alerts = [{ id: uid(), text, ts: now(), read: false }, ...(cur.alerts || [])].slice(0, 50);
-  }
-  function credit(cur, amount, kind, orderId) {
-    cur.wallet.credit = Math.round((cur.wallet.credit + amount) * 100) / 100;
-    cur.wallet.tx = [{ id: uid(), amount, kind, orderId, ts: now() }, ...cur.wallet.tx];
-  }
-  function audit(cur, action, detail) {
-    cur.audit = [{ id: uid(), action, detail, by: 'admin (0562989152)', ts: now() }, ...(cur.audit || [])].slice(0, 200);
-  }
+  const ord = (x) => (typeof x === 'string' ? (sRef.current.orders || []).find((o) => o.id === x) : x);
+  const me = () => sRef.current.auth.phone;
+  const guardFrozen = () => { if (sRef.current.frozen) throw new Error('Your account is frozen. Please contact support.'); };
+  const needWallet = (payVia, amount) => {
+    const bal = sRef.current.wallet.balance;
+    if (payVia === 'wallet' && bal < amount) throw new Error(`Wallet balance ₱${bal} is not enough (about ₱${Math.ceil(amount)} needed). Pay by cash, or ask admin to top up.`);
+  };
 
-  // ---------- public actions ----------
   const api = {
-    tick,
-    signIn: (session) => setS((c) => ({ ...c, auth: session, activeRole: session.role === 'admin' ? 'admin' : 'customer' })),
+    // ---- session / profile (local) ----
+    signIn: (session) => { prevRef.current = null; setS((c) => ({ ...c, auth: session, activeRole: session.role === 'admin' ? 'admin' : 'customer' })); },
+    signOut: () => { stopBgTracking(); prevRef.current = null; setS((c) => ({ ...DEFAULTS(), profile: c.profile, addresses: c.addresses, catalog: c.catalog })); },
     agreeTerms: () => setS((c) => ({ ...c, terms: true })),
-    signOut: () => setS((c) => ({ ...c, auth: null, terms: false, activeRole: 'customer' })),
-
-    placeOrder: (draft) => setS((c) => {
-      const serviceFee = Math.round(draft.fee * c.settings.commissions.customerPct / 100);
-      const o = { id: uid(), mine: true, kind: draft.kind, category: draft.category, items: draft.text,
-                  pickup: draft.pickup, dropoff: draft.dropoff, fee: draft.fee, serviceFee,
-                  status: draft.kind === 'send' ? 'finding_driver' : 'vendor_quote',
-                  photos: {}, neg: null, driverIdx: 0, created: now(), updated: now(), payVia: draft.payVia };
-      const next = { ...c, orders: [o, ...c.orders] };
-      pushAlert(next, 'Order placed');
-      return next;
-    }),
-
-    // customer answers vendor quote/counter
-    quoteAnswer: (orderId, action, amount) => setS((c) => ({
-      ...c, orders: c.orders.map((o) => {
-        if (o.id !== orderId) return o;
-        const n = { ...o, updated: now() };
-        if (action === 'accept') { n.neg = null; n.status = 'finding_driver'; n.paidHeld = true; pushAlert(c, 'Quote approved — payment held'); }
-        if (action === 'counter') {
-          n.neg = { ...n.neg, turn: 'them', amount, history: [...n.neg.history, { by: 'customer', amount, ts: now(), note: 'You countered' }] };
-          n.status = 'vendor_talk';
-        }
-        if (action === 'cancel') { n.neg = null; n.status = 'cancelled'; }
-        return n;
-      }),
-    })),
-
-    // customer answers driver counter (accept/counter/refuse -> next driver)
-    driverAnswer: (orderId, action, amount) => setS((c) => ({
-      ...c, orders: c.orders.map((o) => {
-        if (o.id !== orderId) return o;
-        const n = { ...o, updated: now() };
-        if (action === 'accept') { n.fee = n.neg.amount; n.driver = n.neg.driver || DRIVER_NAMES[(n.driverIdx || 0) % 4]; n.neg = null; n.status = 'accepted'; pushAlert(c, 'Fare confirmed'); }
-        if (action === 'counter') {
-          n.neg = { ...n.neg, turn: 'them', amount, history: [...n.neg.history, { by: 'customer', amount, ts: now(), note: 'You countered' }] };
-          n.status = 'driver_talk';
-        }
-        if (action === 'refuse') { n.neg = null; n.driverIdx = (n.driverIdx || 0) + 1; n.status = 'finding_driver'; pushAlert(c, 'Offer refused — next courier'); }
-        return n;
-      }),
-    })),
-
-    // driver/vendor answer bot offers (my dashboards)
-    offerAnswer: (orderId, action, amount) => setS((c) => ({
-      ...c, orders: c.orders.map((o) => {
-        if (o.id !== orderId) return o;
-        const n = { ...o, updated: now() };
-        if (action === 'accept') { n.neg = null; n.status = 'accepted'; }
-        if (action === 'refuse') { n.expired = true; n.neg = null; }
-        if (action === 'counter') {
-          n.neg = { ...n.neg, turn: 'them', amount,
-                    history: [...n.neg.history, { by: n.myRole, amount, ts: now(), note: 'Your counter' }] };
-        }
-        return n;
-      }),
-    })),
-
-    // vendor sets price + product photo (required)
-    vendorQuote: (orderId, price, photoObj) => setS((c) => ({
-      ...c, orders: c.orders.map((o) => o.id !== orderId ? o : {
-        ...o, price, photos: { ...o.photos, product: photoObj }, updated: now(),
-        neg: { phase: 'vendor', turn: 'them', amount: price,
-               history: [...(o.neg ? o.neg.history : []), { by: 'vendor', amount: price, ts: now(), note: 'Your quote + product photo' }] },
-      }),
-    })),
-    vendorPacked: (orderId, photoObj) => setS((c) => ({
-      ...c, orders: c.orders.map((o) => o.id !== orderId ? o : { ...o, photos: { ...o.photos, packed: photoObj }, status: 'ready_pickup', updated: now() }),
-    })),
-    vendorHandover: (orderId) => setS((c) => ({
-      ...c, orders: c.orders.map((o) => o.id !== orderId ? o : { ...o, status: 'handover_done', updated: now() }),
-    })),
-    driverPickup: (orderId, photoObj) => setS((c) => ({
-      ...c, orders: c.orders.map((o) => o.id !== orderId ? o : { ...o, photos: { ...o.photos, pickup: photoObj }, status: 'picked_up', updated: now() }),
-    })),
-    driverDeliver: (orderId, photoObj) => setS((c) => ({
-      ...c, orders: c.orders.map((o) => o.id !== orderId ? o : { ...o, photos: { ...o.photos, delivery: photoObj }, status: 'delivered', updated: now() }),
-    })),
-    customerConfirm: (orderId) => setS((c) => {
-      const o = c.orders.find((x) => x.id === orderId);
-      const next = { ...c, orders: c.orders.map((x) => x.id !== orderId ? x : { ...x, status: 'completed', updated: now() }) };
-      if (o && o.paidHeld) { next.wallet.tx = [{ id: uid(), amount: -(o.price + o.fee), kind: 'payment', orderId, ts: now() }, ...next.wallet.tx]; }
-      pushAlert(next, 'Delivery confirmed — funds released');
-      return next;
-    }),
-    cancelOrder: (orderId) => setS((c) => ({
-      ...c, orders: c.orders.map((o) => o.id !== orderId ? o : { ...o, status: 'cancelled', updated: now() }),
-    })),
-    dispute: (orderId) => setS((c) => ({
-      ...c, orders: c.orders.map((o) => o.id !== orderId ? o : { ...o, status: 'disputed', updated: now() }),
-    })),
-
-    // role switch + KYC
-    switchRole: (role) => setS((c) => ({ ...c, activeRole: role })),
-    submitKyc: (role, data) => setS((c) => {
-      const entry = { id: uid(), userId: 'me', name: c.profile.name, role, status: 'pending', ts: now(), data };
-      return { ...c, roles: { ...c.roles, [role]: { status: 'pending', data } }, kyc: [entry, ...c.kyc] };
-    }),
-    toggleOnline: (kind, v) => setS((c) => ({ ...c, [kind === 'driver' ? 'driverOnline' : 'storeOpen']: v })),
-
-    // wallet / profile
-    topUp: (amount) => setS((c) => { const n = { ...c }; n.wallet.balance += amount;
-      n.wallet.tx = [{ id: uid(), amount, kind: 'topup', ts: now() }, ...n.wallet.tx]; return n; }),
+    setName: (name) => setS((c) => ({ ...c, profile: { ...c.profile, name } })),
+    setProfile: (patch) => setS((c) => ({ ...c, profile: { ...c.profile, ...(patch || {}) } })),
     addCoupon: (code) => setS((c) => ({ ...c, profile: { ...c.profile, coupons: [...c.profile.coupons, code] } })),
+    switchRole: (role) => setS((c) => ((role === 'customer' || (c.roles[role] && c.roles[role].status === 'approved')) ? { ...c, activeRole: role } : c)),
+    refresh: () => refresh(true),
+    // Apple requires in-app account deletion. Cloud data first (it refuses while orders/wallet are open), then files, then this phone.
+    deleteAccount: async () => {
+      try {
+        const phone2 = me();
+        await C.deleteAccountCloud(phone2);
+        await purgeMyFiles(phone2);
+        stopBgTracking(); prevRef.current = null;
+        AsyncStorage.removeItem(KEY).catch(() => {});
+        setS(DEFAULTS());
+        return true;
+      } catch (e) { Alert.alert('Delete account', errMsg(e)); return false; }
+    },
+
+    // ---- addresses (local) ----
+    addAddress: (a) => setS((c) => {
+      const list = c.addresses || [];
+      return { ...c, addresses: [...list, { id: a.id || uid(), label: a.label || 'Saved', addr: a.addr || '', lat: a.lat || null, lng: a.lng || null, default: !list.some((x) => x.default) }] };
+    }),
+    removeAddress: (id) => setS((c) => {
+      let list = (c.addresses || []).filter((x) => x.id !== id);
+      if (list.length && !list.some((x) => x.default)) list = list.map((x, i) => (i === 0 ? { ...x, default: true } : x));
+      return { ...c, addresses: list };
+    }),
+    setDefaultAddress: (id) => setS((c) => ({ ...c, addresses: (c.addresses || []).map((x) => ({ ...x, default: x.id === id })) })),
+    updateAddress: (id, patch) => setS((c) => ({ ...c, addresses: (c.addresses || []).map((x) => (x.id !== id ? x : { ...x, ...(patch || {}) })) })),
+    getDefaultAddress: () => { const cur = sRef.current; return cur ? ((cur.addresses || []).find((a) => a.default) || (cur.addresses || [])[0] || null) : null; },
+
+    // ---- cart draft (local) — placing it creates one order per store ----
+    addToCart: (e) => setS((c) => ({ ...c, cart: { ...c.cart, items: [...(c.cart.items || []).filter((x) => x.storeId !== e.storeId), { storeId: e.storeId, storeName: e.storeName, description: e.description || '', fees: e.fees || 0 }] } })),
+    removeFromCart: (id) => setS((c) => ({ ...c, cart: { ...c.cart, items: (c.cart.items || []).filter((x) => x.storeId !== id) } })),
+    clearCart: () => setS((c) => ({ ...c, cart: { items: [], shipping_fee: 25 } })),
+    cartTotals: () => {
+      const items = (sRef.current && sRef.current.cart && sRef.current.cart.items) || [];
+      const itemsFee = items.reduce((a, x) => a + (x.fees || 0), 0);
+      const shipping = items.length ? 25 + (items.length - 1) * 8 : 25;
+      return { items: items.length, itemsFee, shipping, total: itemsFee + shipping };
+    },
+    placeCartOrder: (_u, payVia) => run('Cart', async () => {
+      const cur = sRef.current; const items = cur.cart.items || []; if (!items.length) return null;
+      const addr = (cur.addresses || []).find((a) => a.default) || (cur.addresses || [])[0];
+      if (!addr) throw new Error('Add a delivery address first.');
+      guardFrozen();
+      const fee = Math.max(10, Math.round(api.cartTotals().shipping / items.length));
+      for (const it of items) {
+        const store = cur.stores.find((x) => x.id === it.storeId); if (!store) continue;
+        await C.placeOrderCloud({ me: me(), myName: cur.profile.name, store, text: it.description || 'Order from ' + it.storeName, fee, payVia: payVia || 'cash', dropoff: addr });
+      }
+      setS((c) => ({ ...c, cart: { items: [], shipping_fee: 25 } }));
+    }),
+
+    // ---- stores ----
+    listStoresByCategory: (category) => {
+      const want = String(category || '').trim().toLowerCase();
+      return ((sRef.current && sRef.current.stores) || []).filter((x) => x.active && x.open && String(x.category).trim().toLowerCase() === want);
+    },
+    listStoresAll: () => ((sRef.current && sRef.current.stores) || []).filter((x) => x.active && x.open),
+    toggleOnline: (kind, v) => {
+      if (kind === 'driver') { setS((c) => ({ ...c, driverOnline: v })); return Promise.resolve(); }
+      return run('Store', () => C.setStoreOpen(me(), v));
+    },
+    updateDriverLocation: (id, lat, lng, accuracy, source) => setS((c) => ({ ...c, driverLocations: { ...(c.driverLocations || {}), [id]: { lat, lng, ts: now(), accuracy: accuracy || null, source: source || 'fg' } } })),
+    listDriverLocations: () => (sRef.current ? (sRef.current.driverLocations || {}) : {}),
     catalogAdd: (name, price) => setS((c) => ({ ...c, catalog: [...(c.catalog || []), { id: uid(), name, price }] })),
     catalogDel: (id) => setS((c) => ({ ...c, catalog: (c.catalog || []).filter((x) => x.id !== id) })),
-    addAddress: (a) => setS((c) => ({ ...c, addresses: [...c.addresses, a] })),
-    setName: (name) => setS((c) => ({ ...c, profile: { ...c.profile, name } })),
 
-    // ---------- ADMIN ----------
-    adminDecideKyc: (id, ok) => setS((c) => {
-      const k = c.kyc.find((x) => x.id === id);
-      const next = { ...c, kyc: c.kyc.map((x) => x.id !== id ? x : { ...x, status: ok ? 'approved' : 'rejected' }) };
-      if (k && k.userId === 'me') next.roles = { ...c.roles, [k.role]: { status: ok ? 'approved' : 'rejected', data: k.data } };
-      audit(next, ok ? 'KYC approved' : 'KYC rejected', (k ? k.name + ' (' + k.role + ')' : id));
-      return next;
+    // ---- customer: orders and rides ----
+    placeOrder: (d) => run('Order', async () => {
+      guardFrozen();
+      const cur = sRef.current;
+      const store = cur.stores.find((x) => x.id === d.storeId);
+      if (!store) throw new Error('Choose a store first.');
+      return C.placeOrderCloud({ me: me(), myName: cur.profile.name, store, text: d.text, fee: d.fee, payVia: d.payVia || 'cash', dropoff: d.dropoff });
     }),
-    adminOrders: null, // derived
-    adminCancelRefund: (orderId) => setS((c) => {
-      const o = c.orders.find((x) => x.id === orderId);
-      const next = { ...c, orders: c.orders.map((x) => x.id !== orderId ? x : { ...x, status: 'cancelled', updated: now() }) };
-      if (o && o.paidHeld) { next.wallet.balance += o.price + o.fee;
-        next.wallet.tx = [{ id: uid(), amount: o.price + o.fee, kind: 'refund', orderId, ts: now() }, ...next.wallet.tx]; }
-      audit(next, 'Order cancelled + refunded', orderId);
-      return next;
+    placeErrand: (d) => run('Errand', async () => {
+      guardFrozen();
+      const cur = sRef.current;
+      return C.placeErrandCloud({ me: me(), myName: cur.profile.name, text: d.text, hint: d.hint, budget: d.budget, fee: d.fee, payVia: d.payVia || 'cash', dropoff: d.dropoff });
     }),
-    adminReassign: (orderId) => setS((c) => {
-      const next = { ...c, orders: c.orders.map((x) => x.id !== orderId ? x : { ...x, status: 'finding_driver', neg: null, driverIdx: 0, updated: now() }) };
-      audit(next, 'Order reassigned', orderId); return next;
+    shopperQuote: (o0, price, photo) => run('Price', () => C.shopperQuote(ord(o0), me(), price, photo)),
+    shopperRespond: (o0, action, amount) => run('Price', () => C.shopperRespond(ord(o0), me(), action, amount)),
+    placeRide: (d) => run('Ride request', async () => {
+      guardFrozen();
+      const cur = sRef.current, r = cur.settings.ride;
+      if (!r.enabled) throw new Error('Rides are paused right now.');
+      if (d.fee < r.minFare) throw new Error(`The minimum fare is ₱${r.minFare}.`);
+      needWallet(d.payVia, d.fee);
+      return C.placeRideCloud({ me: me(), myName: cur.profile.name, pickup: d.pickup, dest: d.dest, fee: d.fee, note: d.note, payVia: d.payVia || 'cash' });
     }),
-    adminFreeze: (userId, v) => setS((c) => {
-      const next = { ...c, users: c.users.map((u) => u.id !== userId ? u : { ...u, frozen: v }) };
-      audit(next, v ? 'User frozen' : 'User unfrozen', userId); return next;
+    quoteAnswer: (o0, action, amount) => run('Quote', async () => {
+      const o = ord(o0);
+      if (action === 'accept') needWallet(o.payVia, o.neg.amount + o.fee);
+      return C.customerQuote(o, action, amount);
     }),
-    adminAdjustWallet: (userId, amount, reason) => setS((c) => {
-      const next = { ...c, users: c.users.map((u) => u.id !== userId ? u : { ...u, wallet: Math.round((u.wallet + amount) * 100) / 100 }) };
-      audit(next, 'Wallet adjusted ' + (amount > 0 ? '+' : '') + amount, userId + ' — reason: ' + reason);
-      return next;
+    driverAnswer: (o0, action, amount) => run('Courier offer', async () => C.customerDriverAnswer(ord(o0), action, amount, sRef.current.settings)),
+    cancelOrder: (o0) => run('Cancel', () => C.cancelOrderCloud(ord(o0))),
+    dispute: (o0) => run('Report', () => C.disputeOrder(ord(o0))),
+    customerConfirm: (o0) => run('Confirm', () => C.confirmOrder(ord(o0))),
+
+    // ---- vendor ----
+    vendorQuote: (o0, price, photo) => run('Quote', () => C.vendorQuote(ord(o0), price, photo)),
+    vendorRespond: (o0, action, amount) => run('Price', () => C.vendorRespond(ord(o0), action, amount)),
+    vendorDecline: (o0) => run('Order', () => C.vendorDecline(ord(o0))),
+    vendorPacked: (o0, photo) => run('Packed', () => C.vendorPacked(ord(o0), photo)),
+
+    // ---- courier (orders AND rides) ----
+    driverOfferAnswer: (o0, action, amount) => run('Offer', () => C.driverRespond(ord(o0), me(), { name: sRef.current.profile.name, vehicle: sRef.current.myVehicle || '' }, action, amount, sRef.current.settings)),
+    driverPickup: (o0, photo) => run('Pickup', () => C.driverPickup(ord(o0), me(), photo)),
+    driverDeliver: (o0, photo) => run('Delivery', () => C.driverDeliver(ord(o0), me(), photo)),
+    rideStep: (o0, step) => run('Ride', () => (step === 'arrived' ? C.rideArrived : step === 'start' ? C.rideStart : C.rideEnd)(ord(o0), me())),
+    driverCancel: (o0) => run('Cancel', () => C.driverCancel(ord(o0), me())),
+
+    // ---- roles / KYC ----
+    submitKyc: (role, data) => run('Verification', () => C.submitKycCloud(me(), sRef.current.profile.name, role, data)),
+
+    // ---- wallet ----
+    requestWithdrawal: () => Alert.alert('Payouts', 'Withdrawals connect to GCash / Maya in the next update. Your balance is safe in the wallet until then.'),
+
+    // ---- admin ----
+    adminDecideKyc: (k, ok) => run('KYC', () => C.adminDecideKycCloud(typeof k === 'string' ? sRef.current.kyc.find((x) => x.id === k) : k, ok, me())),
+    adminToggleStoreActive: (id) => run('Store', () => { const x = sRef.current.stores.find((y) => y.id === id); return C.adminStoreUpdate(id, { active: !x.active, open: !x.active }, me(), x.active ? 'Store paused' : 'Store activated'); }),
+    adminSetStoreFeatured: (id, v) => run('Store', () => C.adminStoreUpdate(id, { featured: v }, me(), v ? 'Store featured' : 'Store un-featured')),
+    adminFreeze: (phone2, v) => run('User', () => C.adminFreezeCloud(phone2, v, me())),
+    adminAdjustWallet: (phone2, delta, reason) => run('Wallet', () => C.adjustWalletCloud(phone2, delta, reason || 'admin adjustment', me())),
+    adminCancelRefund: (o0) => run('Order', () => C.adminOrderUpdate(ord(o0), 'cancelled', me(), 'Order cancelled by admin')),
+    adminReassign: (o0) => run('Order', () => C.adminOrderUpdate(ord(o0), 'finding_driver', me(), 'Order reassigned')),
+    adminForceComplete: (o0) => run('Order', async () => { const o = ord(o0); if (o.status !== 'delivered') await C.adminOrderUpdate(o, 'delivered', me(), 'Order force-completed'); return C.confirmOrder(o); }),
+    adminSetCommissions: (cm) => run('Settings', () => C.saveSetting('commissions', { customer_pct: cm.customerPct, vendor_pct: cm.vendorPct, driver_pct: cm.driverPct })),
+    adminSetSettings: (patch) => run('Settings', async () => {
+      const map = { offerSecs: 'offer_secs', vendorSecs: 'vendor_secs', customerSecs: 'customer_secs', maxDrivers: 'max_drivers' };
+      for (const [k, v] of Object.entries(patch)) if (map[k]) await C.saveSetting(map[k], v);
+      if (patch.ride) { const r = patch.ride; await C.saveSetting('ride_enabled', !!r.enabled); await C.saveSetting('ride_min_fare', r.minFare); await C.saveSetting('ride_base', r.base); await C.saveSetting('ride_per_km', r.perKm); }
     }),
-    adminSetCommissions: (cm) => setS((c) => { const n = { ...c, settings: { ...c.settings, commissions: cm } };
-      audit(n, 'Commissions updated', JSON.stringify(cm)); return n; }),
-    adminSetSettings: (patch) => setS((c) => { const n = { ...c, settings: { ...c.settings, ...patch } };
-      audit(n, 'Settings updated', Object.keys(patch).join(',')); return n; }),
-    adminSetCategories: (cats) => setS((c) => { const n = { ...c, settings: { ...c.settings, categories: cats } };
-      audit(n, 'Categories updated', cats.join(', ')); return n; }),
-    adminSetBanner: (b) => setS((c) => { const n = { ...c, settings: { ...c.settings, banner: b } };
-      audit(n, 'Banner updated', b.title); return n; }),
-    adminBroadcast: (text, target) => setS((c) => { const n = { ...c };
-      pushAlert(n, '📣 ' + text); audit(n, 'Broadcast sent', target + ': ' + text); return n; }),
+    adminSetCategories: (cats) => run('Settings', () => C.saveSetting('categories', cats)),
+    adminSetBanner: (b) => run('Settings', () => C.saveSetting('banner', b)),
+    adminBroadcast: (text, target) => run('Broadcast', () => C.broadcastCloud(text, target, me())),
 
     resetAll: () => { AsyncStorage.removeItem(KEY); setS(DEFAULTS()); },
   };
